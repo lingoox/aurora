@@ -1,4 +1,4 @@
-package initialize
+package handler
 
 import (
 	"aurora/internal/chatgpt"
@@ -31,8 +31,6 @@ func NewSessionManager() *SessionManager {
 	return sm
 }
 
-// Get 根据 conversationID 获取缓存的 ChatClientState。
-// 不存在时返回 nil；调用方拿到 conversationID 后再调用 Register 注册新状态。
 func (sm *SessionManager) Get(conversationID string) *chatgpt.ChatClientState {
 	if conversationID == "" {
 		return nil
@@ -49,7 +47,6 @@ func (sm *SessionManager) Get(conversationID string) *chatgpt.ChatClientState {
 	return entry.state
 }
 
-// Register 将 ChatClientState 注册到 conversationID 下。
 func (sm *SessionManager) Register(conversationID string, state *chatgpt.ChatClientState) {
 	if conversationID == "" || state == nil {
 		return

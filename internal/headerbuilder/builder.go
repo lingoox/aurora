@@ -2,13 +2,14 @@ package headerbuilder
 
 import (
 	"aurora/httpclient"
+	"aurora/internal/accounts"
 	"aurora/internal/browserfp"
-	"aurora/internal/tokens"
 	"aurora/util"
 	"strings"
 )
 
-// Builder HTTP header 构造器，封装鉴权、cookie、team account 等公共逻辑。
+// Builder HTTP header 构造器，封装鉴权、device ID、sentinel token 等公共逻辑。
+// 使用方法：headerbuilder.New().WithBaseHeaders(convID).WithAuth(account).Build()
 type Builder struct {
 	header httpclient.AuroraHeaders
 }
@@ -55,7 +56,7 @@ func (b *Builder) WithBaseHeaders(conversationID string) *Builder {
 	return b
 }
 
-// WithUserAgent 设置 User-Agent。
+// WithUserAgent 覆盖 User-Agent（仅在非空时覆盖）。
 func (b *Builder) WithUserAgent(ua string) *Builder {
 	if ua != "" {
 		b.header.Set("User-Agent", ua)
@@ -63,7 +64,7 @@ func (b *Builder) WithUserAgent(ua string) *Builder {
 	return b
 }
 
-// WithDeviceID 设置设备 ID。
+// WithDeviceID 设置 Oai-Device-Id。
 func (b *Builder) WithDeviceID(deviceID string) *Builder {
 	if deviceID != "" {
 		b.header.Set("Oai-Device-Id", deviceID)
@@ -71,7 +72,7 @@ func (b *Builder) WithDeviceID(deviceID string) *Builder {
 	return b
 }
 
-// WithSessionID 设置 session ID。
+// WithSessionID 设置 Oai-Session-Id。
 func (b *Builder) WithSessionID(sessionID string) *Builder {
 	if sessionID != "" {
 		b.header.Set("Oai-Session-Id", sessionID)
@@ -81,34 +82,36 @@ func (b *Builder) WithSessionID(sessionID string) *Builder {
 
 // ── 鉴权 header ──
 
-// WithAuth 根据 secret 设置鉴权 header（Bearer token 或 Oai-Device-Id）。
-func (b *Builder) WithAuth(secret *tokens.Secret) *Builder {
-	if secret == nil {
+// WithAuth 根据 account 类型设置鉴权 header。
+//   - TypeNoAuth → Oai-Device-Id
+//   - 其他类型（TypeFree/TypePUID）→ Authorization: Bearer
+func (b *Builder) WithAuth(account *accounts.Account) *Builder {
+	if account == nil {
 		return b
 	}
-	if secret.IsFree && secret.Token != "" {
-		b.header.Set("Oai-Device-Id", secret.Token)
+	if account.Type == accounts.TypeNoAuth && account.Token != "" {
+		b.header.Set("Oai-Device-Id", account.Token)
 	}
-	if !secret.IsFree && secret.Token != "" {
-		b.header.Set("Authorization", "Bearer "+secret.Token)
+	if account.Type != accounts.TypeNoAuth && account.Token != "" {
+		b.header.Set("Authorization", "Bearer "+account.Token)
 	}
 	return b
 }
 
-// WithCookies 根据 secret 设置 cookie header。
-func (b *Builder) WithCookies(secret *tokens.Secret) *Builder {
-	if secret == nil {
+// WithCookies 根据 account 设置 Cookie header（PUID + oai-did）。
+func (b *Builder) WithCookies(account *accounts.Account) *Builder {
+	if account == nil {
 		return b
 	}
 	cookieStr := ""
-	if secret.PUID != "" {
-		cookieStr = "_puid=" + secret.PUID
+	if account.PUID != "" {
+		cookieStr = "_puid=" + account.PUID
 	}
-	if secret.IsFree && secret.Token != "" {
+	if account.Type == accounts.TypeNoAuth && account.Token != "" {
 		if cookieStr != "" {
 			cookieStr += "; "
 		}
-		cookieStr += "oai-did=" + secret.Token
+		cookieStr += "oai-did=" + account.Token
 	}
 	if cookieStr != "" {
 		b.header["Cookie"] = cookieStr
@@ -116,10 +119,10 @@ func (b *Builder) WithCookies(secret *tokens.Secret) *Builder {
 	return b
 }
 
-// WithTeamAccount 根据 secret 设置 team account header。
-func (b *Builder) WithTeamAccount(secret *tokens.Secret) *Builder {
-	if secret != nil && strings.TrimSpace(secret.TeamUserID) != "" {
-		b.header.Set("Chatgpt-Account-Id", strings.TrimSpace(secret.TeamUserID))
+// WithTeamAccount 设置 Chatgpt-Account-Id header。
+func (b *Builder) WithTeamAccount(account *accounts.Account) *Builder {
+	if account != nil && strings.TrimSpace(account.TeamUserID) != "" {
+		b.header.Set("Chatgpt-Account-Id", strings.TrimSpace(account.TeamUserID))
 	}
 	return b
 }
@@ -128,13 +131,17 @@ func (b *Builder) WithTeamAccount(secret *tokens.Secret) *Builder {
 
 // WithContentType 设置 Content-Type。
 func (b *Builder) WithContentType(ct string) *Builder {
-	b.header.Set("Content-Type", ct)
+	if ct != "" {
+		b.header.Set("Content-Type", ct)
+	}
 	return b
 }
 
-// WithAccept 设置 Accept。
+// WithAccept 设置 Accept（覆盖 WithBaseHeaders 设置的默认值）。
 func (b *Builder) WithAccept(accept string) *Builder {
-	b.header.Set("Accept", accept)
+	if accept != "" {
+		b.header.Set("Accept", accept)
+	}
 	return b
 }
 
@@ -149,13 +156,14 @@ func (b *Builder) WithTargetPath(path string) *Builder {
 
 // ── Sentinel Token ──
 
-// WithSentinelTokens 设置 sentinel 相关的 token header。
+// SentinelTokens sentinel 相关 token 集合，用于设置 sentinel header。
+// 与 chatgpt.TurnStile 解耦，避免 import 循环。
 type SentinelTokens struct {
-	TurnStileToken              string
+	TurnStileToken               string
 	ChatRequirementsPrepareToken string
-	ProofOfWorkToken            string
-	TurnstileToken              string
-	SOToken                     string
+	ProofOfWorkToken             string
+	TurnstileToken               string
+	SOToken                      string
 }
 
 // WithSentinelTokens 设置 sentinel token header。
@@ -180,7 +188,7 @@ func (b *Builder) WithSentinelTokens(tokens SentinelTokens) *Builder {
 
 // ── Conduit Token ──
 
-// WithConduitToken 设置 X-Conduit-Token（即使为空也设置）。
+// WithConduitToken 设置 X-Conduit-Token（即使为空也设置，除非传了空字符串）。
 func (b *Builder) WithConduitToken(token string) *Builder {
 	b.header.Set("X-Conduit-Token", token)
 	return b
@@ -198,7 +206,7 @@ func (b *Builder) WithTurnTraceID(id string) *Builder {
 
 // ── Conversation 特有 header ──
 
-// WithConversationHeaders 设置 conversation 请求特有的 header。
+// WithConversationHeaders 设置 conversation 请求特有的 header（Oai-Echo-Logs, Oai-Telemetry）。
 func (b *Builder) WithConversationHeaders(targetPath string) *Builder {
 	if strings.HasSuffix(targetPath, "/f/conversation") && !strings.HasSuffix(targetPath, "/prepare") {
 		b.header.Set("Oai-Echo-Logs", "0,943,1,65876,0,68124,1,68930")
@@ -212,19 +220,4 @@ func (b *Builder) WithConversationHeaders(targetPath string) *Builder {
 // NewBaseHeader 创建基础 header（无 state）。
 func NewBaseHeader() httpclient.AuroraHeaders {
 	return New().WithBaseHeaders("").Build()
-}
-
-// NewBaseHeaderWithState 创建带 state 的基础 header。
-func NewBaseHeaderWithState(conversationID, deviceID, sessionID, userAgent string) httpclient.AuroraHeaders {
-	b := New().WithBaseHeaders(conversationID)
-	if deviceID != "" {
-		b.WithDeviceID(deviceID)
-	}
-	if sessionID != "" {
-		b.WithSessionID(sessionID)
-	}
-	if userAgent != "" {
-		b.header.Set("User-Agent", userAgent)
-	}
-	return b.Build()
 }

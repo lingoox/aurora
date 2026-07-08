@@ -3,8 +3,11 @@ package bogdanfinn
 import (
 	"aurora/httpclient"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
@@ -14,6 +17,7 @@ import (
 type TlsClient struct {
 	Client    tls_client.HttpClient
 	ReqBefore handler
+	proxyURL  string // 当前绑定的代理，用于 debug 日志
 }
 
 type handler func(r *fhttp.Request) error
@@ -90,14 +94,41 @@ func (t *TlsClient) Request(method httpclient.HttpMethod, url string, headers ht
 			return nil, err
 		}
 	}
+	debugLog("[http] %s %s via %s", method, sanitizeURL(url), t.proxyDesc())
+	start := time.Now()
 	do, err := t.Client.Do(req)
+	elapsed := time.Since(start)
 	if err != nil {
+		debugLog("[http] %s %s ERROR: %v (%v)", method, sanitizeURL(url), err, elapsed)
 		return nil, err
 	}
+	debugLog("[http] %s %s -> %d (%v)", method, sanitizeURL(url), do.StatusCode, elapsed)
 	return convertResponse(do), nil
 }
 
+// proxyDesc 返回当前代理描述，用于 debug 日志
+func (t *TlsClient) proxyDesc() string {
+	if t.proxyURL != "" {
+		return "proxy:" + t.proxyURL
+	}
+	return "direct"
+}
+
+func debugLog(format string, args ...interface{}) {
+	if os.Getenv("DEBUG_HTTP") != "" {
+		log.Printf(format, args...)
+	}
+}
+
+func sanitizeURL(raw string) string {
+	if len(raw) > 120 {
+		return raw[:80] + "..." + raw[len(raw)-30:]
+	}
+	return raw
+}
+
 func (t *TlsClient) SetProxy(url string) error {
+	t.proxyURL = url
 	return t.Client.SetProxy(url)
 }
 
