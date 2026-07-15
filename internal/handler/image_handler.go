@@ -175,9 +175,14 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 	}
 
 	proxyUrl := account.Proxy
-	client := setupClientWithProxy(proxyUrl)
-	client.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
-	turnStile, status, err := chatgpt.InitSentinel(client, account, proxyUrl, 0)
+	var imgClient *bogdanfinn.TlsClient
+	if c, ok := account.Client.(*bogdanfinn.TlsClient); ok && c != nil {
+		imgClient = c
+	} else {
+		imgClient = setupClientWithProxy(proxyUrl)
+		imgClient.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
+	}
+	turnStile, status, err := chatgpt.InitSentinel(imgClient, account, proxyUrl, 0)
 	if err != nil {
 		if status == http.StatusUnauthorized {
 			h.accountPool.ReportFailure(account)
@@ -208,7 +213,7 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 				ProgressText: fmt.Sprintf("Generating image %d/%d ...", i+1, imageRequest.N),
 			})
 		}
-		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImages(client, account, turnStile, imageRequest.Prompt, imageRequest.Model, proxyUrl)
+		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImages(imgClient, account, turnStile, imageRequest.Prompt, imageRequest.Model, proxyUrl)
 		if err != nil {
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{
@@ -236,7 +241,7 @@ func (h *ImageHandler) Generations(c *gin.Context) {
 				if imageResult.B64JSON != "" {
 					item.B64JSON = imageResult.B64JSON
 				} else if imageResult.URL != "" {
-					imageBytes, err := chatgpt.DownloadImageBytes(client, imageResult.URL, account)
+					imageBytes, err := chatgpt.DownloadImageBytes(imgClient, imageResult.URL, account)
 					if err != nil {
 						if stream {
 							writeImageStreamEvent(c, "image.generation.error", gin.H{
@@ -896,9 +901,14 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 	}
 
 	proxyUrl := account.Proxy
-	client := setupClientWithProxy(proxyUrl)
-	client.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
-	turnStile, status, err := chatgpt.InitSentinel(client, account, proxyUrl, 0)
+	var editClient *bogdanfinn.TlsClient
+	if c, ok := account.Client.(*bogdanfinn.TlsClient); ok && c != nil {
+		editClient = c
+	} else {
+		editClient = setupClientWithProxy(proxyUrl)
+		editClient.SetCookies("https://chatgpt.com", chatgpt.BasicCookies)
+	}
+	turnStile, status, err := chatgpt.InitSentinel(editClient, account, proxyUrl, 0)
 	if err != nil {
 		if status == http.StatusUnauthorized {
 			h.accountPool.ReportFailure(account)
@@ -919,7 +929,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 	// 1) 上传所有源图
 	references := make([]chatgpt.ImageEditReference, 0, len(imageSources))
 	for idx, src := range imageSources {
-		uploaded, upStatus, upErr := chatgpt.UploadFile(client, account, proxyUrl, src.Filename, src.ContentType, src.Data)
+		uploaded, upStatus, upErr := chatgpt.UploadFile(editClient, account, proxyUrl, src.Filename, src.ContentType, src.Data)
 		if upErr != nil {
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{
@@ -961,7 +971,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 				ProgressText: fmt.Sprintf("Generating image %d/%d ...", i+1, n),
 			})
 		}
-		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImagesWithReferences(client, account, turnStile, prompt, model, proxyUrl, references)
+		imageResults, upstreamText, err := chatgpt.GeneratePictureConversationImagesWithReferences(editClient, account, turnStile, prompt, model, proxyUrl, references)
 		if err != nil {
 			if stream {
 				writeImageStreamEvent(c, "image.generation.error", gin.H{
@@ -989,7 +999,7 @@ func (h *ImageHandler) runImageEditFlow(c *gin.Context, asVariation bool) {
 				if imageResult.B64JSON != "" {
 					item.B64JSON = imageResult.B64JSON
 				} else if imageResult.URL != "" {
-					imageBytes, err := chatgpt.DownloadImageBytes(client, imageResult.URL, account)
+					imageBytes, err := chatgpt.DownloadImageBytes(editClient, imageResult.URL, account)
 					if err != nil {
 						if stream {
 							writeImageStreamEvent(c, "image.generation.error", gin.H{
