@@ -503,11 +503,16 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 	ttftSet := false
 	var ttftMs int64
 
+	// 流式工具调用: 增量解析 <tool_call> 块,块外文本走 output_text.delta。
+	toolParser := toolcall.NewParser()
+	funcCallCount := 0
+	var streamToolCalls []officialtypes.ToolCall
 	for i := h.cfg.MaxContinueCount; i > 0; i-- {
 		var continue_info *chatgpt.ContinueInfo
 		result := chatgpt.HandlerDetailedWithOptions(c, response, client, account, uid, translated_request, true, reqModel, chatgpt.HandlerDetailedOptions{
-			Websocket:   wsConn,
-			ClientState: clientState,
+			Websocket:         wsConn,
+			ClientState:       clientState,
+			SuppressRawStream: true,
 		})
 		wsConn = nil
 		full_response += result.Text
@@ -531,15 +536,42 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 				ttftSet = true
 				ttftMs = time.Since(startTime).Milliseconds()
 			}
-			textEvt := officialtypes.ResponsesTextDeltaEvent{
-				Type:         "response.output_text.delta",
-				ItemID:       messageItemID,
-				OutputIndex:  1,
-				ContentIndex: 0,
-				Delta:        result.Text,
+			textDelta, calls := toolParser.Feed(result.Text)
+			if textDelta != "" {
+				textEvt := officialtypes.ResponsesTextDeltaEvent{
+					Type:         "response.output_text.delta",
+					ItemID:       messageItemID,
+					OutputIndex:  1,
+					ContentIndex: 0,
+					Delta:        textDelta,
+				}
+				c.Writer.WriteString("event: response.output_text.delta\ndata: " + textEvt.String() + "\n\n")
 			}
-			c.Writer.WriteString("event: response.output_text.delta\ndata: " + textEvt.String() + "\n\n")
+			// 已闭合的 tool_call 块 -> 完整的 function_call 事件序列
+			streamToolCalls = append(streamToolCalls, calls...)
+			for _, call := range calls {
+				funcCallCount++
+				fcID := "fc_" + call.ID
+				outIdx := 1 + funcCallCount // reasoning=0, message=1, function_call 从 2 起
+				c.Writer.WriteString("event: response.output_item.added\ndata: " + responsesFunctionCallItemAddedEvent(outIdx, fcID, call.ID, call.Function.Name) + "")
+				argsEvt := officialtypes.ResponsesFunctionCallArgsEvent{
+					Type:        "response.function_call_arguments.delta",
+					ItemID:      fcID,
+					OutputIndex: outIdx,
+					Delta:       call.Function.Arguments,
+				}
+				c.Writer.WriteString("event: response.function_call_arguments.delta\ndata: " + argsEvt.String() + "\n\n")
+				doneEvt := officialtypes.ResponsesFunctionCallArgsEvent{
+					Type:        "response.function_call_arguments.done",
+					ItemID:      fcID,
+					OutputIndex: outIdx,
+					Delta:       call.Function.Arguments,
+				}
+				c.Writer.WriteString("event: response.function_call_arguments.done\ndata: " + doneEvt.String() + "\n\n")
+				c.Writer.WriteString("event: response.output_item.done\ndata: " + responsesFunctionCallItemDoneEvent(outIdx, fcID, call) + "\n\nn")
+			}
 		}
+
 
 		if flusher != nil {
 			flusher.Flush()
@@ -592,7 +624,19 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 
 	output_tokens := util.CountToken(full_response)
 	reasoning_tokens := util.CountToken(full_thinking)
-	responsesResponse := officialtypes.NewResponsesResponse(full_response, full_thinking, input_tokens, output_tokens, reasoning_tokens, cachedTokens, cacheWriteTokens, reqModel)
+	// 冲刷 parser 尾部未闭合的 tool_call 块
+	_, tailCalls := toolParser.Flush()
+	allCalls := append(streamToolCalls, tailCalls...)
+	for i := range allCalls {
+		allCalls[i].Index = i
+	}
+	var responsesResponse officialtypes.ResponsesResponse
+	if len(allCalls) > 0 {
+		cleanText := toolcall.StripToolCallBlocks(full_response)
+		responsesResponse = officialtypes.NewResponsesResponseWithToolCalls(cleanText, full_thinking, allCalls, input_tokens, output_tokens, reasoning_tokens, cachedTokens, cacheWriteTokens, reqModel)
+	} else {
+		responsesResponse = officialtypes.NewResponsesResponse(full_response, full_thinking, input_tokens, output_tokens, reasoning_tokens, cachedTokens, cacheWriteTokens, reqModel)
+	}
 	// 在 response.completed 事件里附带 timing（HTTP headers 在首次 Flush 后不可写）
 	responsesResponse.MsSinceStart = time.Since(startTime).Milliseconds()
 	if ttftSet {

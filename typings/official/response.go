@@ -275,6 +275,19 @@ func (e ResponsesTextDeltaEvent) String() string {
 	b, _ := json.Marshal(e)
 	return string(b)
 }
+// ResponsesFunctionCallArgsEvent 对应 function_call 参数的流式增量事件
+// ("response.function_call_arguments.delta" / ".done")。
+type ResponsesFunctionCallArgsEvent struct {
+	Type        string `json:"type"`
+	ItemID      string `json:"item_id"`
+	OutputIndex int    `json:"output_index"`
+	Delta       string `json:"delta"`
+}
+
+func (e ResponsesFunctionCallArgsEvent) String() string {
+	b, _ := json.Marshal(e)
+	return string(b)
+}
 
 type ResponsesCreatedEvent struct {
 	Type     string            `json:"type"`

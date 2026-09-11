@@ -151,6 +151,10 @@ type HandlerDetailedOptions struct {
 	ArtifactDelivery string
 	ProxyURL         string
 	Tools            []official_types.Tool
+	// SuppressRawStream: stream=true 时仍累积文本/思维链到 HandlerResult,
+	// 但不把原始 chat.completion.chunk 直接写到 c.Writer。
+	// 供 /v1/responses 等自行重排 SSE 事件的调用方使用。
+	SuppressRawStream bool
 }
 
 // HandlerDetailedWithOptions 处理对话响应流（最完整版）。
@@ -178,14 +182,15 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 		}
 	}
 
-	if stream {
+	if stream && !options.SuppressRawStream {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("X-Accel-Buffering", "no")
-	} else {
+	} else if !stream {
 		c.Header("Content-Type", "application/json")
 	}
+	// SuppressRawStream 时不动 header —— 调用方(如 /v1/responses)已自行设置 SSE 头
 	var finish_reason string
 	var previous_text typings.StringStruct
 	var original_response chatgpt_types.ChatGPTResponse
@@ -211,7 +216,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 			return
 		}
 		sentinel = append(sentinel, items...)
-		if !stream {
+		if !stream || options.SuppressRawStream {
 			return
 		}
 		for _, item := range items {
@@ -251,7 +256,7 @@ func HandlerDetailedWithOptions(c *gin.Context, response *http.Response, client 
 			"kind":  "analysis",
 			"delta": delta,
 		}})
-		if stream {
+		if stream && !options.SuppressRawStream {
 			reasoningChunk := official_types.NewReasoningChunk(delta, model)
 			if convId != "" {
 				reasoningChunk.ConversationID = convId
@@ -393,7 +398,7 @@ readLoop:
 					currentEvent = ""
 					continue
 				}
-				if stream {
+				if stream && !options.SuppressRawStream {
 					outChunk := *streamEvent.chunk
 					if len(outChunk.Choices) > 0 {
 						outChunk.Choices[0].Delta.Content = deltaText
@@ -584,7 +589,7 @@ readLoop:
 			}
 		endProcess:
 			isRole = false
-			if stream {
+			if stream && !options.SuppressRawStream {
 				_, err = c.Writer.WriteString(response_string)
 				if err != nil {
 					return HandlerResult{}
@@ -599,7 +604,7 @@ readLoop:
 				finish_reason = original_response.Message.Metadata.FinishDetails.Type
 			}
 			if isEnd {
-				if stream {
+				if stream && !options.SuppressRawStream {
 					final_line := official_types.StopChunkWithConversation(finish_reason, model, convId)
 					c.Writer.WriteString("data: " + final_line.String() + "\n\n")
 					c.Writer.Flush()

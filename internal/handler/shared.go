@@ -313,6 +313,42 @@ func responsesOutputItemAddedEvent(outputIndex int, itemID, itemType string) str
 	}
 	b, _ := json.Marshal(evt)
 	return string(b)
+}
+// responsesFunctionCallItemAddedEvent 构造 function_call item 的 added 事件。
+func responsesFunctionCallItemAddedEvent(outputIndex int, itemID, callID, name string) string {
+	item := map[string]interface{}{
+		"id":      itemID,
+		"type":    "function_call",
+		"status":  "in_progress",
+		"call_id": callID,
+		"name":    name,
+	}
+	evt := map[string]interface{}{
+		"type":         "response.output_item.added",
+		"output_index": outputIndex,
+		"item":         item,
+	}
+	b, _ := json.Marshal(evt)
+	return string(b)
+}
+
+// responsesFunctionCallItemDoneEvent 构造 function_call item 的 done 事件。
+func responsesFunctionCallItemDoneEvent(outputIndex int, itemID string, call officialtypes.ToolCall) string {
+	item := map[string]interface{}{
+		"id":        itemID,
+		"type":      "function_call",
+		"status":    "completed",
+		"call_id":   call.ID,
+		"name":      call.Function.Name,
+		"arguments": call.Function.Arguments,
+	}
+	evt := map[string]interface{}{
+		"type":         "response.output_item.done",
+		"output_index": outputIndex,
+		"item":         item,
+	}
+	b, _ := json.Marshal(evt)
+	return string(b)
 }
 
 func responsesOutputItemDoneEvent(outputIndex int, itemID, itemType, text string) string {
