@@ -88,3 +88,59 @@ func TestNewResponsesResponseWithoutReasoning(t *testing.T) {
 		t.Fatalf("first output type = %q, want message", resp.Output[0].Type)
 	}
 }
+
+// 验证 Responses API 的 tools/tool_choice 解析与 function_call item 映射。
+func TestResponsesAPIRequestToolsMapping(t *testing.T) {
+	raw := `{
+		"model": "gpt-4o-mini",
+		"instructions": "You are a helpful agent.",
+		"tools": [
+			{"type": "function", "name": "get_weather", "description": "查询天气", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}
+		],
+		"tool_choice": "required",
+		"input": [
+			{"role": "user", "content": "北京天气怎么样"},
+			{"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{\"city\":\"北京\"}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "22度,晴"}
+		]
+	}`
+	var req ResponsesAPIRequest
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	api, err := req.ToAPIRequest()
+	if err != nil {
+		t.Fatalf("ToAPIRequest: %v", err)
+	}
+	// tools 平铺 → 嵌套
+	if len(api.Tools) != 1 || api.Tools[0].Function.Name != "get_weather" {
+		t.Fatalf("tools mapping wrong: %+v", api.Tools)
+	}
+	if api.ToolChoice == nil || api.ToolChoice.Type != "required" {
+		t.Fatalf("tool_choice wrong: %+v", api.ToolChoice)
+	}
+	// instructions → system 消息在最前
+	if api.Messages[0].Role != "system" {
+		t.Fatalf("first msg role = %q", api.Messages[0].Role)
+	}
+	// user 消息
+	if api.Messages[1].Role != "user" {
+		t.Fatalf("msg[1] role = %q", api.Messages[1].Role)
+	}
+	// function_call → assistant + ToolCalls
+	m2 := api.Messages[2]
+	if m2.Role != "assistant" || len(m2.ToolCalls) != 1 {
+		t.Fatalf("function_call mapping wrong: %+v", m2)
+	}
+	if m2.ToolCalls[0].ID != "call_1" || m2.ToolCalls[0].Function.Name != "get_weather" {
+		t.Fatalf("call ref wrong: %+v", m2.ToolCalls[0])
+	}
+	// function_call_output → role=tool
+	m3 := api.Messages[3]
+	if m3.Role != "tool" || m3.ToolCallID != "call_1" {
+		t.Fatalf("function_call_output mapping wrong: %+v", m3)
+	}
+	if m3.Content.Text() != "22度,晴" {
+		t.Fatalf("output text wrong: %q", m3.Content.Text())
+	}
+}

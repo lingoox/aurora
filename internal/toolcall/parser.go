@@ -364,3 +364,28 @@ func marshalArguments(v any) string {
 func generateCallID() string {
 	return "call_" + newCallIDSuffix()
 }
+
+// StripToolCallBlocks 从文本中删除所有 <tool_call>...</tool_call> 段落
+// (含未闭合的尾部段落),返回纯正文。用于 Responses API 把 function_call
+// 以结构化 item 输出时,避免协议标签混入 message 文本。
+func StripToolCallBlocks(text string) string {
+	if !strings.Contains(text, StartTag) {
+		return text
+	}
+	var b strings.Builder
+	for {
+		start := strings.Index(text, StartTag)
+		if start < 0 {
+			b.WriteString(text)
+			break
+		}
+		b.WriteString(text[:start])
+		text = text[start:]
+		end := strings.Index(text, EndTag)
+		if end < 0 {
+			break // 未闭合的尾部段落: 丢弃剩余部分
+		}
+		text = text[end+len(EndTag):]
+	}
+	return strings.TrimRight(b.String(), "\n 	")
+}

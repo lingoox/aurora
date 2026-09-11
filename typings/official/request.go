@@ -15,29 +15,29 @@ type APIRequest struct {
 	// - Tools:      客户端声明的可调用工具列表
 	// - ToolChoice: 强制 / 允许 / 禁止模型调用工具
 	// - ParallelToolCalls: 是否允许同一轮发起多个 tool_call(默认 true)
-	Tools              []Tool      `json:"tools,omitempty"`
-	ToolChoice         *ToolChoice `json:"tool_choice,omitempty"`
-	ParallelToolCalls  *bool       `json:"parallel_tool_calls,omitempty"`
+	Tools             []Tool      `json:"tools,omitempty"`
+	ToolChoice        *ToolChoice `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool       `json:"parallel_tool_calls,omitempty"`
 
 	// ── 标准生成参数 ──
-	Temperature         *float64   `json:"temperature,omitempty"`
-	TopP                *float64   `json:"top_p,omitempty"`
-	N                   *int       `json:"n,omitempty"`
-	Stop                *StopParam `json:"stop,omitempty"`
-	MaxTokens           *int       `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int       `json:"max_completion_tokens,omitempty"`
-	PresencePenalty     *float64   `json:"presence_penalty,omitempty"`
-	FrequencyPenalty    *float64   `json:"frequency_penalty,omitempty"`
+	Temperature         *float64    `json:"temperature,omitempty"`
+	TopP                *float64    `json:"top_p,omitempty"`
+	N                   *int        `json:"n,omitempty"`
+	Stop                *StopParam  `json:"stop,omitempty"`
+	MaxTokens           *int        `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int        `json:"max_completion_tokens,omitempty"`
+	PresencePenalty     *float64    `json:"presence_penalty,omitempty"`
+	FrequencyPenalty    *float64    `json:"frequency_penalty,omitempty"`
 	LogitBias           map[int]int `json:"logit_bias,omitempty"`
-	Seed                *int       `json:"seed,omitempty"`
+	Seed                *int        `json:"seed,omitempty"`
 
 	// ── 扩展参数 ──
-	ResponseFormat  *ResponseFormat  `json:"response_format,omitempty"`
-	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
-	StreamOptions   *StreamOptions   `json:"stream_options,omitempty"`
-	User            string           `json:"user,omitempty"`
+	ResponseFormat  *ResponseFormat   `json:"response_format,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
+	StreamOptions   *StreamOptions    `json:"stream_options,omitempty"`
+	User            string            `json:"user,omitempty"`
 	Metadata        map[string]string `json:"metadata,omitempty"`
-	Store           *bool            `json:"store,omitempty"`
+	Store           *bool             `json:"store,omitempty"`
 }
 
 // StopParam 接受 string 或 []string。
@@ -94,7 +94,7 @@ type ToolFunction struct {
 //   - "any"     : 强制至少调用一个
 //   - &ToolChoice{Type: "function", Function: {Name: "X"}} : 强制调用 X
 type ToolChoice struct {
-	Type     string             `json:"type"`
+	Type     string              `json:"type"`
 	Function *ToolChoiceFunction `json:"function,omitempty"`
 }
 
@@ -370,6 +370,15 @@ type ResponsesAPIRequest struct {
 	Instructions json.RawMessage `json:"instructions"`
 	Stream       bool            `json:"stream"`
 
+	// 工具调用: Responses API 的 tools 是平铺格式
+	// ({type:"function", name, description, parameters}),
+	// 与 Chat Completions 的嵌套格式 ({type:"function", function:{...}}) 不同。
+	Tools      []ResponsesTool `json:"tools,omitempty"`
+	ToolChoice *ToolChoice     `json:"tool_choice,omitempty"`
+	// previous_response_id: 代理无状态,不支持服务端拼接历史;
+	// 客户端应重传完整 input items。保留字段仅用于解析不报错。
+	PreviousResponseID string `json:"previous_response_id,omitempty"`
+
 	// 标准生成参数
 	Temperature     *float64 `json:"temperature,omitempty"`
 	TopP            *float64 `json:"top_p,omitempty"`
@@ -381,6 +390,34 @@ type ResponsesAPIRequest struct {
 	Store     *bool               `json:"store,omitempty"`
 	User      string              `json:"user,omitempty"`
 	Metadata  map[string]string   `json:"metadata,omitempty"`
+}
+
+// ResponsesTool 对应 Responses API tools[*] 的平铺 function 定义。
+// 与 Chat Completions 的 Tool(嵌套 function 字段)互相转换。
+type ResponsesTool struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+// toChatTools 把 Responses 平铺格式转成 Chat Completions 嵌套格式。
+func (r ResponsesAPIRequest) toChatTools() []Tool {
+	out := make([]Tool, 0, len(r.Tools))
+	for _, t := range r.Tools {
+		if t.Type != "function" {
+			continue
+		}
+		out = append(out, Tool{
+			Type: "function",
+			Function: ToolFunction{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  t.Parameters,
+			},
+		})
+	}
+	return out
 }
 
 // ResponseFormatText 对应 Responses API 的 text.query.format。
@@ -430,6 +467,12 @@ func (r ResponsesAPIRequest) ToAPIRequest() (APIRequest, error) {
 		apiRequest.ResponseFormat = r.Text.Format
 	}
 
+	// tools / tool_choice 透传(平铺 → 嵌套)
+	if chatTools := r.toChatTools(); len(chatTools) > 0 {
+		apiRequest.Tools = chatTools
+		apiRequest.ToolChoice = r.ToolChoice
+	}
+
 	if instruction := rawText(r.Instructions); instruction != "" {
 		apiRequest.Messages = append(apiRequest.Messages, NewTextMessage("system", instruction))
 	}
@@ -471,27 +514,67 @@ func responsesInputToMessages(raw json.RawMessage) ([]APIMessage, error) {
 		return []APIMessage{{Role: "user", Content: content}}, nil
 	}
 
-	var messages []responseInputMessage
-	if err := json.Unmarshal(raw, &messages); err != nil {
+	// item 数组可能混有普通消息与工具 item(function_call / function_call_output)。
+	var items []responsesInputItem
+	if err := json.Unmarshal(raw, &items); err != nil {
 		return nil, fmt.Errorf("invalid input")
 	}
 
-	result := make([]APIMessage, 0, len(messages))
-	for _, message := range messages {
-		role := message.Role
-		if role == "" {
-			role = "user"
+	result := make([]APIMessage, 0, len(items))
+	for _, item := range items {
+		switch item.Type {
+		case "function_call":
+			// 模型的工具调用 item → assistant 消息 + ToolCalls
+			ref := ToolCallRef{
+				Index: len(result),
+				ID:    item.CallID,
+				Type:  "function",
+			}
+			ref.Function.Name = item.Name
+			ref.Function.Arguments = item.Arguments
+			result = append(result, APIMessage{
+				Role:      "assistant",
+				ToolCalls: []ToolCallRef{ref},
+			})
+		case "function_call_output":
+			// 工具执行结果 item → role=tool 消息
+			result = append(result, APIMessage{
+				Role:       "tool",
+				ToolCallID: item.CallID,
+				Content:    MessageContent{TextValue: item.Output},
+			})
+		default:
+			role := item.Role
+			if role == "" {
+				role = "user"
+			}
+			content, err := responseContentToMessageContent(item.Content)
+			if err != nil {
+				content = MessageContent{TextValue: responsesContentToText(item.Content)}
+			}
+			if content.Text() == "" && len(content.Files()) == 0 {
+				continue
+			}
+			result = append(result, APIMessage{Role: role, Content: content})
 		}
-		content, err := responseContentToMessageContent(message.Content)
-		if err != nil {
-			content = MessageContent{TextValue: responsesContentToText(message.Content)}
-		}
-		if content.Text() == "" && len(content.Files()) == 0 {
-			continue
-		}
-		result = append(result, APIMessage{Role: role, Content: content})
 	}
 	return result, nil
+}
+
+// responsesInputItem 对应 Responses API input 数组的混合 item 形态:
+// 普通 role 消息 + 工具 item(function_call / function_call_output)。
+// 同一数组里两类可以自由混排(规范允许)。
+type responsesInputItem struct {
+	// 普通消息字段
+	Type    string          `json:"type,omitempty"`
+	Role    string          `json:"role,omitempty"`
+	Content json.RawMessage `json:"content,omitempty"`
+	// function_call 字段
+	CallID    string `json:"call_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+	// function_call_output 字段
+	Output string `json:"output,omitempty"`
 }
 
 func responseContentToMessageContent(raw json.RawMessage) (MessageContent, error) {

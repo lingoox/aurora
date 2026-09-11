@@ -286,6 +286,42 @@ type ResponsesCompletedEvent struct {
 	Response ResponsesResponse `json:"response"`
 }
 
+// NewResponsesResponseWithToolCalls 构造带 function_call 输出的 Responses 响应。
+// toolCalls 非空时,文本中的 <tool_call> 段落已被剥离,输出为 function_call item 序列,
+// status 为 "requires_action"(等待客户端回传 function_call_output)。
+func NewResponsesResponseWithToolCalls(text, reasoning string, toolCalls []ToolCall, inputTokens, outputTokens, reasoningTokens int, cachedTokens, cacheWriteTokens int, model string) ResponsesResponse {
+	resp := NewResponsesResponse(text, reasoning, inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheWriteTokens, model)
+	if len(toolCalls) == 0 {
+		return resp
+	}
+	// 剥离 message item 里的 <tool_call> 文本(协议标签不透传给客户端)
+	resp.OutputText = text
+	for i := range resp.Output {
+		if resp.Output[i].Type != "message" {
+			continue
+		}
+		for j := range resp.Output[i].Content {
+			if resp.Output[i].Content[j].Type == "output_text" {
+				resp.Output[i].Content[j].Text = text
+			}
+		}
+	}
+	// 追加 function_call items
+	for _, c := range toolCalls {
+		resp.Output = append(resp.Output, ResponsesOutputItem{
+			ID:        "fc_" + c.ID,
+			Type:      "function_call",
+			Status:    "completed",
+			CallID:    c.ID,
+			Name:      c.Function.Name,
+			Arguments: c.Function.Arguments,
+		})
+	}
+	resp.Status = "requires_action"
+	resp.OutputText = ""
+	return resp
+}
+
 func NewResponsesResponse(text, reasoning string, inputTokens, outputTokens, reasoningTokens int, cachedTokens, cacheWriteTokens int, model string) ResponsesResponse {
 	if model == "" {
 		model = "auto"
@@ -390,10 +426,14 @@ type ResponsesOutputTokensDetails struct {
 // ResponsesOutputItem 对齐 OpenAI ResponseOutputItem 的最小形态。
 type ResponsesOutputItem struct {
 	ID      string                 `json:"id"`
-	Type    string                 `json:"type"` // "message" | "reasoning"
+	Type    string                 `json:"type"` // "message" | "reasoning" | "function_call"
 	Status  string                 `json:"status,omitempty"`
 	Role    string                 `json:"role,omitempty"`
-	Content []ResponsesContentPart `json:"content"`
+	Content []ResponsesContentPart `json:"content,omitempty"`
+	// function_call 字段(Responses 规范的平铺形态)
+	CallID    string `json:"call_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 type ResponsesContentPart struct {

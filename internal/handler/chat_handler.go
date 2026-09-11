@@ -424,7 +424,30 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 
 		output_tokens := util.CountToken(full_response)
 		reasoning_tokens := util.CountToken(full_thinking)
-		responsesResponse := officialtypes.NewResponsesResponse(full_response, full_thinking, input_tokens, output_tokens, reasoning_tokens, cachedTokens, cacheWriteTokens, reqModel)
+		// 工具调用: 解析 <tool_call> 协议标签(与 chat completions 同一套)
+		var toolCalls []officialtypes.ToolCall
+		if len(original_request.Tools) > 0 {
+			parser := toolcall.NewParser()
+			_, calls := parser.Feed(full_response)
+			if len(calls) == 0 {
+				_, extraCalls := parser.Flush()
+				calls = append(calls, extraCalls...)
+			}
+			if len(calls) == 0 {
+				calls = toolcall.RecoverFromText(full_response, original_request.Tools)
+			}
+			for i := range calls {
+				calls[i].Index = i
+			}
+			toolCalls = calls
+		}
+		var responsesResponse officialtypes.ResponsesResponse
+		if len(toolCalls) > 0 {
+			cleanText := toolcall.StripToolCallBlocks(full_response)
+			responsesResponse = officialtypes.NewResponsesResponseWithToolCalls(cleanText, full_thinking, toolCalls, input_tokens, output_tokens, reasoning_tokens, cachedTokens, cacheWriteTokens, reqModel)
+		} else {
+			responsesResponse = officialtypes.NewResponsesResponse(full_response, full_thinking, input_tokens, output_tokens, reasoning_tokens, cachedTokens, cacheWriteTokens, reqModel)
+		}
 		c.JSON(200, responsesResponse)
 		return
 	}
